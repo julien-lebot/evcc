@@ -1,18 +1,20 @@
 package charger
 
 import (
+	"github.com/evcc-io/evcc/api"
+	"github.com/evcc-io/evcc/core/loadpoint"
 	"testing"
 
 	"github.com/enbility/cemd/emobility"
 	"github.com/golang/mock/gomock"
 )
 
-func TestEEBusIsCharging(t *testing.T) {
-	type limitStruct struct {
-		phase           uint
-		min, max, pause float64
-	}
+type limitStruct struct {
+	phase           uint
+	min, max, pause float64
+}
 
+func TestEEBusIsCharging(t *testing.T) {
 	type measurementStruct struct {
 		phase   uint
 		current float64
@@ -139,4 +141,112 @@ func TestEEBusIsCharging(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEEBusSetCurrentLimits(t *testing.T) {
+	ctrl := gomock.NewController(t)
+
+	type loadpointLimit struct {
+		min, max float64
+	}
+	testData := []struct {
+		emobilityLimits []limitStruct
+		lpLimits        loadpointLimit
+		fn              func(apiMock *loadpoint.MockAPI)
+	}{
+		{
+			emobilityLimits: []limitStruct{
+				{1, 6, 16, 0},
+				{2, 6, 16, 0},
+				{3, 6, 16, 0},
+			},
+			lpLimits: loadpointLimit{
+				min: 2.0,
+				max: 10.0,
+			},
+			fn: func(apiMock *loadpoint.MockAPI) {
+				apiMock.EXPECT().GetVehicle().Return(nil)
+				apiMock.EXPECT().SetMinCurrent(6.0).MaxTimes(1)
+				apiMock.EXPECT().SetMaxCurrent(gomock.Any()).MaxTimes(0)
+			},
+		},
+		{
+			emobilityLimits: []limitStruct{
+				{1, 6, 16, 0},
+				{2, 6, 16, 0},
+				{3, 6, 16, 0},
+			},
+			lpLimits: loadpointLimit{
+				min: 6.0,
+				max: 32.0,
+			},
+			fn: func(apiMock *loadpoint.MockAPI) {
+				apiMock.EXPECT().GetVehicle().Return(nil)
+				apiMock.EXPECT().SetMinCurrent(gomock.Any()).MaxTimes(0)
+				apiMock.EXPECT().SetMaxCurrent(16.0).MaxTimes(1)
+			},
+		},
+		{
+			emobilityLimits: []limitStruct{
+				{1, 2, 32, 0},
+			},
+			lpLimits: loadpointLimit{
+				min: 6.0,
+				max: 10.0,
+			},
+			fn: func(apiMock *loadpoint.MockAPI) {
+				apiMock.EXPECT().GetVehicle().Return(nil)
+				apiMock.EXPECT().SetMinCurrent(gomock.Any()).MaxTimes(0)
+				apiMock.EXPECT().SetMaxCurrent(gomock.Any()).MaxTimes(0)
+			},
+		},
+		{
+			emobilityLimits: []limitStruct{
+				{1, 2, 32, 0},
+			},
+			lpLimits: loadpointLimit{
+				min: 1.0,
+				max: 42.0,
+			},
+			fn: func(apiMock *loadpoint.MockAPI) {
+				vehicle := api.NewMockVehicle(ctrl)
+				anyCurrent := -1.0
+				vehicle.EXPECT().OnIdentified().Return(api.ActionConfig{
+					MinCurrent: &anyCurrent,
+					MaxCurrent: &anyCurrent,
+				}).AnyTimes()
+				apiMock.EXPECT().GetVehicle().Return(vehicle)
+				apiMock.EXPECT().SetMinCurrent(gomock.Any()).MaxTimes(0)
+				apiMock.EXPECT().SetMaxCurrent(gomock.Any()).MaxTimes(0)
+			},
+		},
+	}
+
+	for _, tc := range testData {
+		limitsMin := make([]float64, 0)
+		limitsMax := make([]float64, 0)
+		limitsDefault := make([]float64, 0)
+
+		for _, limit := range tc.emobilityLimits {
+			limitsMin = append(limitsMin, limit.min)
+			limitsMax = append(limitsMax, limit.max)
+			limitsDefault = append(limitsDefault, limit.pause)
+		}
+
+		emobilityMock := emobility.NewMockEmobilityI(ctrl)
+		emobilityMock.EXPECT().EVCurrentLimits().Return(limitsMin, limitsMax, limitsDefault, nil)
+
+		apiMock := loadpoint.NewMockAPI(ctrl)
+		apiMock.EXPECT().GetMinCurrent().Return(tc.lpLimits.min)
+		apiMock.EXPECT().GetMaxCurrent().Return(tc.lpLimits.max)
+
+		tc.fn(apiMock)
+
+		eebus := &EEBus{
+			emobility: emobilityMock,
+		}
+		eebus.LoadpointControl(apiMock)
+	}
+
+	ctrl.Finish()
 }
